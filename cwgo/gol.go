@@ -7,18 +7,20 @@ import (
 	"time"
 )
 
-func buildWorld(world [][]byte, index, subHeight, imageWidth int,numOfWorker int, sendByte chan byte){
+func buildWorld(world [][]byte, index, restOfRows, subHeight, imageWidth int, numOfWorker int, sendByte chan byte){
 
 	//make a new world with height of workers' world plus 2
-	workPlace := make([][]byte,subHeight + 2)
-	for i := range workPlace{
-		workPlace[i] = make([]byte, imageWidth)
-	}
+
 
 	//create a switch sentence to deal with the cases that height out of boundary
 	switch index{
 	//height of -1
 	case 0:
+		workPlace := make([][]byte,subHeight + 2)
+		for i := range workPlace{
+			workPlace[i] = make([]byte, imageWidth)
+		}
+
 		workPlace[0] = world[len(world) - 1]
 		for y := 1; y < subHeight + 2; y++{
 			for x := 0; x < imageWidth; x++{
@@ -26,29 +28,61 @@ func buildWorld(world [][]byte, index, subHeight, imageWidth int,numOfWorker int
 			}
 		}
 
+		for y := 0; y < subHeight + 2; y ++{
+			for x := 0; x < imageWidth; x++{
+				sendByte <- workPlace[y][x]
+			}
+		}
+
 	//height of imageHeight + 1
 	case numOfWorker - 1:
+
+		if restOfRows != 0{
+			subHeight += restOfRows
+		}
+
+		workPlace := make([][]byte,subHeight + 2)
+		for i := range workPlace{
+			workPlace[i] = make([]byte, imageWidth)
+		}
+
 		workPlace[subHeight + 1] = world[0]
+
 		for y := 0; y < subHeight + 1; y++{
 			for x := 0; x < imageWidth; x++{
-				workPlace[y][x] = world[index * subHeight + y - 1][x]
+				workPlace[y][x] = world[index * (subHeight - restOfRows) + y - 1][x]
+			}
+		}
+
+		for y := 0; y < subHeight + 2; y ++{
+			for x := 0; x < imageWidth; x++{
+				sendByte <- workPlace[y][x]
 			}
 		}
 
 	//height in the boundary
 	default:
+		workPlace := make([][]byte,subHeight + 2)
+		for i := range workPlace{
+			workPlace[i] = make([]byte, imageWidth)
+		}
+
 		for y := 0; y < subHeight + 2; y++{
 			for x := 0; x < imageWidth; x++{
 				workPlace[y][x] = world[index * subHeight + y - 1][x]
 			}
 		}
-	}
 
-	for y := 0; y < subHeight + 2; y ++{
-		for x := 0; x < imageWidth; x++{
-			sendByte <- workPlace[y][x]
+		for y := 0; y < subHeight + 2; y ++{
+			for x := 0; x < imageWidth; x++{
+				sendByte <- workPlace[y][x]
+			}
 		}
 	}
+
+
+
+
 	//return the cut world and wait to be sent to workers
 }
 //a function that deal with every single world parts and return the next turn of this part
@@ -147,30 +181,33 @@ func distributor(p golParams, d distributorChans, alive chan []cell, key chan ru
 	sendByte := make(chan byte)
 	ticker := time.NewTicker(2 * time.Second)
 
-	for turns := 0; turns < p.turns; turns++ {
-		subHeight := p.imageHeight/p.threads
+	restOfRows := p.imageHeight % p.threads
+	subHeight := p.imageHeight/p.threads
+
+	running := true
+	for turns := 0; turns < p.turns && running ; turns++ {
 
 	select{
 
 	case pressedKey := <- key:
 		if pressedKey == 's'{
-			//printBoard(d, p, world)
 			d.io.command <- ioOutput
 			d.io.filename <- strings.Join([]string{strconv.Itoa(p.imageWidth), strconv.Itoa(p.imageHeight), strconv.Itoa(turns)}, "x")
 			d.io.outputWorld <- world
 		}else if pressedKey == 'q'{
-			//printBoard(d, p, world)
 			d.io.command <- ioOutput
 			d.io.filename <- strings.Join([]string{strconv.Itoa(p.imageWidth), strconv.Itoa(p.imageHeight), strconv.Itoa(turns)}, "x")
 			d.io.outputWorld <- world
 			fmt.Println("program terminating...")
-			return
+			running = false
 		}else if pressedKey == 'p'{
 			fmt.Println(turns)
 			for{
 				pausing := <- key
-				if pausing == 'p'{break}else{
+				if pausing == 'p'{
 					fmt.Println("continuing...")
+					break
+				}else{
 					continue}
 			}
 		}
@@ -187,38 +224,64 @@ func distributor(p golParams, d distributorChans, alive chan []cell, key chan ru
 		}
 		fmt.Println("number of alive cells is:", len(finalAlive))
 
-	default: continue
+	default:
+		//put code here
 	}
 
 		//split the world and distribute them to workers
 		for i := 0; i < p.threads; i++{
 			out[i] = make(chan byte)
-			go worker(subHeight, p.imageWidth, sendByte, out[i])
-			buildWorld(world, i, subHeight, p.imageWidth, p.threads, sendByte)
+
+			if i == p.threads - 1{
+				go worker(subHeight + restOfRows, p.imageWidth, sendByte, out[i])
+			}else{
+				go worker(subHeight, p.imageWidth, sendByte, out[i])
+			}
+			buildWorld(world, i, restOfRows, subHeight, p.imageWidth, p.threads, sendByte)
+
 		}
 
 
 		//receive world parts and re-gather them
 		for i := 0; i < p.threads; i++{
-
-			newWorldPart := make([][]byte, subHeight)
-			for i := range newWorldPart{
-				newWorldPart[i] = make([]byte, p.imageHeight)
-			}
-
-			for y := 0 ; y < len(newWorldPart); y++{
-				for x := 0; x < p.imageWidth; x++{
-					newWorldPart[y][x] = <- out[i]
+			if i != p.threads - 1{
+				newWorldPart := make([][]byte, subHeight)
+				for i := range newWorldPart{
+					newWorldPart[i] = make([]byte, p.imageHeight)
 				}
-			}
 
-			for y := 0; y < subHeight; y++{
-				for x := 0; x < p.imageHeight; x++{
-					world[subHeight * i + y][x] = newWorldPart[y][x]
+				for y := 0 ; y < subHeight; y++{
+					for x := 0; x < p.imageWidth; x++{
+						newWorldPart[y][x] = <- out[i]
+					}
+				}
+
+				for y := 0; y < subHeight; y++{
+					for x := 0; x < p.imageWidth; x++{
+						world[subHeight * i + y][x] = newWorldPart[y][x]
+					}
+				}
+			}else{
+				newWorldPart := make([][]byte, subHeight + restOfRows)
+				for i := range newWorldPart{
+					newWorldPart[i] = make([]byte, p.imageWidth)
+				}
+
+				for y := 0 ; y < /*len(newWorldPart)*/ subHeight + restOfRows; y++{
+					for x := 0; x < p.imageWidth; x++{
+						newWorldPart[y][x] = <- out[i]
+					}
+				}
+
+				for y := 0; y < subHeight + restOfRows; y++{
+					for x := 0; x < p.imageHeight; x++{
+						world[subHeight * i + y][x] = newWorldPart[y][x]
+					}
 				}
 			}
 		}
 	}
+
 
 
 	// Create an empty slice to store coordinates of cells that are still alive after p.turns are done.
@@ -228,6 +291,7 @@ func distributor(p golParams, d distributorChans, alive chan []cell, key chan ru
 		for x := 0; x < p.imageWidth; x++ {
 			if world[y][x] != 0 {
 				finalAlive = append(finalAlive, cell{x: x, y: y})
+				fmt.Println(x, y)
 			}
 		}
 	}
